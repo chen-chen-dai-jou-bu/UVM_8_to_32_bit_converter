@@ -1,0 +1,44 @@
+# RX Engine Verification Environment
+
+This project implements a UVM-based verification environment for the RX Engine DUT.
+
+The design under test is an encrypted RX Engine RTL module.  
+The testbench contains an RX agent, virtual interface, sequence items, sequences, scoreboard, coverage collector, reference model, and top-level testbench.
+
+## Directory Structure
+
+```text
+HW1/
+├── filelist_rx.f                    # Compile order management file
+├── Makefile
+├── README                           # This file
+├── rtl/
+│   └── rx_eng.vp                    # DUT: Encrypted RX Engine RTL code
+└── testbench/
+    ├── agent_rx/
+    │   ├── rx_agent.sv              # rx_agent_c: instantiate sequencer, driver, input monitor and output monitor
+    │   ├── rx_driver.sv             # rx_driver_c: drive transactions onto input interface
+    │   ├── rx_in_monitor.sv         # rx_in_monitor_c: sample DUT inputs, publish request to scoreboard
+    │   ├── rx_out_monitor.sv        # rx_out_monitor_c: sample DUT outputs, publish response to scoreboard
+    │   ├── sequences/
+    │   │   └── rx_sequence.sv       # rx_sequence_c: generate and manage transaction sequences
+    │   └── transactions/
+    │       ├── rx_payload_body.sv   # rx_payload_body_c: data payload top class
+    │       ├── rx_req_trans.sv      # rx_req_trans_c: request transactions used by DUT input
+    │       └── rx_rsp_trans.sv      # rx_rsp_trans_c: response transactions used by DUT output
+    │
+    ├── interfaces/
+    │   └── rx_intf.sv               # Virtual interface for both DUT and TB
+    │
+    ├── packages/
+    │   └── packet_base_trans.sv     # Base transaction for all transactions
+    │
+    ├── tb_env/
+    │   ├── rx_coverage.sv           # rx_coverage_c: RX Engine coverage collector
+    │   ├── rx_env.sv                # rx_env_c: wire agent, scoreboard and coverage
+    │   ├── rx_ref_model.sv          # rx_ref_model_c: reference model for DUT function
+    │   ├── rx_scoreboard.sv         # rx_scoreboard_c: check correctness of results
+    │   └── uvmtb_rx.sv              # Top-level testbench
+    │
+    └── tests/
+        └── rx_test.sv               # Launch sequence, report coverage and pass/fail
