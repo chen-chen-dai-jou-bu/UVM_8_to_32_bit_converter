@@ -8,7 +8,6 @@ The testbench contains an RX agent, virtual interface, sequence items, sequences
 ## Directory Structure
 
 ```text
-HW1/
 ├── filelist_rx.f                    # Compile order management file
 ├── Makefile
 ├── README                           # This file
