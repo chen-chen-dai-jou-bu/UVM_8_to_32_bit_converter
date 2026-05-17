@@ -1,0 +1,174 @@
+`timescale 1ns/100ps
+/********************************************************************************
+ * Design Name       : Serial In and Parallel Out RX Engine, From 8 bits to 32 bits
+ * Function          : Collects incoming 8-bit bytes and assembles them
+ *                     into 32-bit parallel words with LSB-first packing;
+ *                     supports full and partial beats (pad-zero flush),
+ *                     and generates valid_out, byte_cnt mask, and last pulse.
+ * File Name         : rtl/rx_eng.v
+ * Original Author   : Michael Su, Sr. Consultant, SiCADA
+ * Version           : 2.0
+ * Modification Date : 2025-08-15
+ * Modified by       : Hua-Chen Wu
+ * Modification Date : 2026-01-08
+ * Modified by       : Michael Su
+ * Modifications     :
+ *   ??flush_partial:
+ *       ??per updated spec, when RXDV deasserts with leftover bytes
+ *         (byte_no != 2?™b00), do NOT output immediately;
+ *         instead enter a pad-zero phase of (4 - byte_no) cycles,
+ *         then assert valid_out once after full 4-byte beat.
+ *       ??add flush_cnt to count pad cycles, ensuring fixed 4-cycle interval
+ *         between valid_out pulses regardless of leftover bytes.
+ *   ??pack_lsbfirst:
+ *       ??change data packing into LSB-first order instead of MSB-first
+ *       ??implement packing by OR'ing new byte into proper 8-bit slot:
+ *           data_out <= data_out | (rxd << (8 * byte_no));
+ *       ??update byte_vld mask shifting to LSB-first for both full and partial words
+ *   ??pack_lsbfirst_eco:
+ *       ??beat-boundary clear: on first byte of each 4-byte beat,
+ *         clear data_out before OR-accumulating new byte to avoid residual bits
+ *   ??fix_byte_no_increment:
+ *       ??ensure byte_no is incremented when receiving the first byte
+ *         so that subsequent bytes advance correctly and valid_out can fire
+ *   ??add_last_signal:
+ *       ??introduce output reg last to indicate the final 32-bit word
+ *       ??reset last to 0 on reset, normal receive, and idle
+ *       ??on partial-flush final cycle, assert last=1 alongside valid_out
+ *   ??pack_shift_width_fix (NEW, safety):
+ *       ??widen rxd to 32-bit before shifting to avoid truncation on some tools:
+ *           ({24'h0, rxd}) << (8 * byte_no)
+ *   ??Bug_fix : 4-byte align fails to assert last signal (2026-01-08)
+ *       ??Remove flush_cnt due to useless and use rxing instead to control
+ ********************************************************************************/
+
+module rx_eng (
+    input             clk,				// Clock input
+    input             rst_n,			// Asynchronous reset (active low), synchronous release
+    input             conv_en,		// Conversion enable: hold high during valid bytes
+    input             rxdv,				// RX data valid indicator
+    input       [7:0] rxd,				// Incoming serial byte
+    output reg        valid_out,	// Asserted when a 32-bit word is ready
+    output reg        last,				// Asserted high on the cycle of the final word
+    output reg  [9:0] byte_cnt,		// Receive Byte Count
+    output reg [31:0] data_out		// Assembled 32-bit parallel output
+);
+
+  // byte_no    : position within 4-byte window (00,01,10,11)
+  // byte_vld   : valid byte of data_out
+  // rxing      : high when in receive or flush state
+  reg [1:0] byte_no;
+  reg [3:0] byte_vld;
+  reg       rxing;
+
+`protected128
+P'_*#V?9' MC.;PM)##S@O5K5 RF:U_HZL_>V7UOK=WT".D@>=HI%O48<X7JD\X> 
+PQOU_:5 9Q5Z/S7.]6_,1-NK0M$VISD2#3M8XTP?\^Z/,=J,+8*DVY$5:?[3D[P$L
+P=;@O!3!N&?AKB6W$, "!GV$1.3HD\XYNZ/U'0L-)FH/R7JY5'U_RE2=%4N[!S..%
+PVIYB.'C3X:JPJ9 ;DQL+%D<=K[HX)WKQ2=#9VQ:]15?,26F0&1_*UPO5"U';=?GA
+PKT&39'?IL2D[T/3&)6-)MN?A3TE&#HT5OEVAD4-S1>.N$?,RDU03+U'5$OM5);';
+P1NW9!>U>^T4/45,=,@: ;DM5*%VVIN&"BJ^;@\D8BE*$M.8;>&@0WQ<L6-%"U42Z
+P5&3\!ILWT%#+-B8C1%NZ6^^F>-6<GVK/7D[6$1KHW_@Y%A;.4!W%+,!_!3I\GME%
+PP.Z4C;?,,5)H7S\ ZU%-!..<Q#?Q>H!)!S0/)X[>Q(20Z>W@RDR+*XTU)ME@GOGB
+PS:+ @]%YAQ1:OIZ'(2Z\>R?SN/@$]:<#.PP'-AHCI#2V4NC?F&B,)W-4UE%/JD":
+P:%19<N 2CCM=O,TYAA9N>,5@6BI"Z@GW8Q4S[A\\P[U3?N!GNO6;J\AXF?7,G<H0
+P L[>HE<9"="%C#+EYT$"F#?T\/2WLN%>-(&CA6$(IJY#G6JP3#BW.A%O5F/2VQE,
+PCL9BO<0PA?U2A>*1B3'VUS!'UG:RH+695YM@-*I["F&9PQQJ"S0<$^D*SP36]?1'
+PL0^B&.*.IG5=F6)KE??4'Z$(:\]9]YD9"G;U@9CBQS7Q3[K2@@!V)@VS5 IX48^^
+P8@W-A#PU(UW0,FP%'D3I;=,4EBT+OD,PE)]:<AC"HV-1B,1OA>&P6D^?$Y%WX3S)
+PH(T26ZGRA]N?84&86K0/*C'9D0]FZH\GW$HQ4Q,XJ:)5G*IJ].?#B(_1\3&2:^X_
+POAI@NGH9?M2(8P?Y9FJ"PC4&08PZ833YI-$["1[VL) ?9/S=V];?0:B]@N;?.242
+P=[H"&G1POP9>2)*"IO[9JV4'@$*&INI5R\3'.ED6  YX79F=<2>2\X4O-,)G"UN/
+PM$;;Q6J;9J"F0D$"5E-K!?<J2RIQ)L*Z]A!$8XJ8'GFZZL],+A[!57Z-$JFPQ-H1
+P0TP.CT-DG'($SR[-=KG=I>:E$UKM7[3:FL5Y:6"UJ? 1TI0G'D+)+\C)6!:Z 5K^
+P9C22.=9&/S"FTD'\ZZ-]&NT;=7$IZ0I]&4=8<W$Q7VNI%9ZJP#EK"4%P'M4[><HM
+PZU(HF[S&%FFU?#<]$OQP&M736W&)#Z;LB#0B6M0ZSM\6\J[8H1UVUZCI+VQ6L9O]
+PA 8G(=GN5PZXJL:[P-?$>)9VO[^J!\Y"8(>0K@5:FYCZ8B*I$1I53UH2AR:D>(PH
+PK>C^M3@PQ6%3%KD2V\<*J25LT0V6B(3U"*QM'A;1/GEM&-)RX+L@)CPW.LEHZJ&'
+PQTL"Y?H4K&X+. NBD#[0F;8T!&*0]FLB?>^SY1# /4_[^C5!O8D7R^E8/^ BD2A?
+P2\A/UT9H=D2X/+ >XFZ9_\<6JSV-/!\+'U[8U$.K("6G<P[G<'2XBW+]M$";P= "
+PQ9<99SY#J3CN(M/&3/57>N^J@_PADMAQ)0VR&DJ9._72!*?,7/B^D(.$TTL(6!#B
+P;GS1-0I\]V*7Y-M^E-H=A=5C-^^"N@_3V22OJY<>I@"LNH_' SZH25MY0U@%J 'A
+P)97&HF[JUJ[0A9G1&I)+YH3QZO?GA2WA#H1_EU_CFWP1I!F0;PV;&N1D%,^-KSUN
+PRN-HG%VO9*TR/8SH@$ZQ#A"$?E6<=216[D)HW8 ^D[!X'6?LVUPQ/"&#V>_;S'_,
+PUSIA(G/)R<@4:&D=$N 3>R&3>)[?4%;$XTA*,P;91";6J[94^;0J4, N+T#VV1EI
+PCM1+/D&?.%GK\VE/029LQJ;Q=A<3@P,+717M7AL8+9XF+8/%TF:!KXIW<=G,!7B.
+P< 9EZ-?:(>46P2*._AXS$<UR)L'5V6M1=_-*7EO.N*T'/Q:>Z%1@2'8>"-QSM\+\
+P_TQ>S6V&J$'8=)O1= 5V]7-_,X8%,N@2@PS+N29PY4(+U*1D<C'%X9*52"*:_827
+P'6.]'*^M[)T>Q]\2%NSQ B/<8T^XS]I&S199BO6?."H?Y\7:"/>S[P3YASN0Z&)]
+PLFX-/0H!33%@@T\L9N26HAX 6697+<ABFU4QIP+_#X.W6%OI3^;*-R\5=%A5&R=0
+P'9[7(GG:8)S,+B,HV>1$0-FC;<H%VQ/_'XF*CKDL[;32H[Z;(6JKQ&:BV\=-&<!:
+PFB[Y2WR^)$Q19T%41^(LH.4;W? _XX:]AD"I<L"1P'WL_C6@5B7(+X^E.M.-T)]R
+P?=E@W+6 JPK4KM!]:4N7'EI6[![1 %A<,"^Y)4E^7<2]TCMB::UO;^<WHH]=!MW,
+PWOF83*PH ^36=@I5H>ZT*^VBMG%VBO-FG19DSK0%%&17F09HK:"S)K 1L6^0#[JG
+PKE%D)[ZU,:0CTH+Z=EHV#JT;7_M7G54OQ<Y MH^NV@6LE<@%J?U7T)\XV9<3#*5/
+PWNAY%DO7V,\D=<Y! 62 @XUW@8%Q);![4/GLB$1H(G6#\*CB<,5!8(:O\A["I*I*
+P=*)C#VM':'9:W?@'\3&UUO^PDC4.8!DOIC.CH""]QC%64HKOQ)VQ8.!T;5KM[[3%
+P5F%2GL6$!S9?MEQ!Y:-R=$P!Q+67<?$PM3M1U"^6CWHC*8H.^!>ZY>W< R<<01/(
+PB^DL$G&5?AB_?"_EONDX$&U^+$E[35L<H15Y'Z*FU[:O B#6[?M<+]X8E^;&=!?Y
+P?K9ELX@BH]=8T"\KU%'LK.G 1)PV"$[!5<C__AS,\5)F:A24R\6/@V:"<7II0)"0
+P]-V,0'=&)6LJ6NX#0UN'E2^"PXL*ZG(P7#-;Y1"X"5>B(@$D0,+@ :;&&O39)3LG
+P4_NXQBIZSC@,:-Y[?,K/7.] .$*&Y.%K'"]T]ZV")YKO77?C27"#GQM"\!#/C:-B
+PBAE- B?<>EG'?#GJZ^TZDN!BXU^()^T56+_=.<$NN)6,3MLYQNJ']KHFU_H 5!\"
+P;\!&U>'2<*M$X-QAUN2#_'9+_:1OFG4[6(-4@8^=2M%#AQ)*0FY;I1:CZ+-JZ/TH
+PSK3;X =_C1]TO1E\)-7XX9]%/10D=--,3.ZM53-G5]Q["(>+.D&G,6$/G'H5<@QA
+PHF:1%LEM:&S_^AK:LVK6V%/M81*UPP@P[0MGK[^S+29VAB#']*DN=L"J&\XR!!/4
+P;F,9B LFRK1/]\6#U4\,I("X)4MCP6J4/ QIHK$$!9M*80W?\UZDPAE]113'V%+W
+PDCE[ S%/0;;<0+#1T91.-IWJ0/Q*.FMD6EEC\?]PME2^"R#&VJ[N:FU #E^3T_T]
+P_OR-IZN%_U+JC3P\.8]GY3>,^$T+E'H_5:8H*KY,)?>(<G"R*Z,=H688XI</7B= 
+P%F&R(*V2F(>W6K,V*#\I"35Y6C[I6PA&4U875AA85D#^0-%YN-1V1OL<2%["IHZ 
+PB[P&V[EP!36X6H;4<G"T!,3("G9OVG;=SQ.G;$^$, 4MY2U:;P08]M>>>%/, )JP
+PFF;IE .W>J24W-A_Z3)W;U#=4*Y,'$4CTX0VI,64E$Q+71_I!WIV,6?(QH/-_9=Y
+P8U/!1\$$ &V2=$HFA'E#)!-Z6R.#A# &4C1'HJNLGTV88D5*J]P+S?1>2<B!7SYJ
+P)#=#A7(DTQI6%B^6=84C7V^CX#F.!867CO,="2,@%91+=F #L^7&L:,UI-9,%7.[
+P6G:RH&M[S)[OX-N"'6[BBBF_'9?1[<7D^MZ,^;=[J_2\P(X228QB6EHG\M*]7V>/
+P:IT(7VQ:5D[_R7Y$$9PUO;VQICR].2?L(Z]W"F]*08RPWOY0"TI<=]?(!T<LHMB=
+P^PD051]UJ"4.!V5EQ=^8S?!9RI(_1Q+*9Q362/VB+_ !:\:T\.,&HT@SBU7UMN)N
+P-P.5,Y#IWS=*P>5L+S(KLS8T9[*DN</:1W+NJE@.MZB1+'\K[K#61*2ZBC27%)_S
+PDR!*)_J=$=WGR(V1,>3^;!)M=:"4@%JG/G WC]0@DC"226GZ"& Q]#V6PQ5+'4V!
+P!GD29T]@ /C/=9*-K0H.NS<:F#>QA4<,,TXH2Z!&A+3!%SK/5Y@HS>U23 :N8K$K
+PNHFFV!HL]VQ;&J$DMBT=Z$JMAHJH(2IA]D,?L:/&D&+ X:OW#C??8@V=$H-H7&[2
+PHBJ=*-KQ+.)HWOYU=P[HU47A\(\\#B%/,G18+JJE/J@#$3D$B>X,XZY(S61_)>.S
+P4H61%=#,_K/%1X[:)I^Y<VKW&SF[K9YOP2]0]/BS4W/Y< N)@%'0:L#U(_ O?VG:
+P7&DWFY(_?MQ?A(86/"<#S5HTGSR_\U2[<H8J5STEI@Z?PZ(L)D=PO<GLJ<_A]WI"
+P(&Y,'(%CQ443HY7KNNWXKY<"%7D,:#B3$C!$*.F8$CSS(7L"CCEZG/KIYPK?CN(G
+P$!+E_<S#74>2_W/)I4NQ'7:0-X:K$P^0F2[7AW#"5R1  '*EBK^.DLRL^))0$M-(
+PD?#%>=VK-N0;-R.DT+S+SC_#(9GTVUECX)7%WSW9@]*C K^(.W18K40K';6HP,OI
+P?OBF7U__-S^[=G"$T1MQ29$9O?]0Q >!5P$X-D4/]B!T_:7W;X\.B?]TN',:GAY>
+PB4"-Z=.3F%5<.*!R'6K%'[< '-YV6,:)<_["4@KK8Z1M2A5E2ZY_?4/(TML([/UG
+PMT(MK,-[9:,9%_URV2U^N (0UYT1BT40NE00[PIYU>=9T-DB1" E9[*E-6E];(2&
+PD;!UN56(#C[I=*[*!'5\_6(3J,/*<2)_17C3&30$+Z'UEK.H]=BN7L;2=GY,KGQT
+P @0V3JMFL^LP1&S:'8F @,Z)!NY?VMS5@-74"A9$SMAZ&^K,NH" ;N=6$I2P#,2N
+PKKA&1HTP]6C<3_Z"PL^]6)-LS!B:8,#_ZBH#X;P.E)M +Q'87F[2P,0CL\!=@C3]
+P!0QD'640M]'A7^YR(*[R)@"6[B^WX]H^3PKD&M,7"7LE;7-<#.T!_F3*>E')WHD@
+PT!;[;(0A9HSNFA0[HCYB=D5!*=NU4*QS('*FA\/]ZBBYTJHQ+B<)9F*_SNG+@?.J
+PUZ3QH8%SE/5?D9(<\SG6-M9 W \,XUG4_)-';P;8G[57RR3T=P%3F'?YV[0B@>08
+PEWFR&I(8WD#J<S'-$;GTGCSC ;:;LOL5BGI 9C"FZ $;#+C*LY_6'%,7PYA7/U(E
+P->+'R>LYN9_? -JUA+J#6 Y(3Z-)SC6L5Q-$V=IQ9=0V!-.#Q<T!:?GUXE@HORYJ
+PU=?Z7;"5ZN$K)9-;3UP?;);Z'D'D\JN=R!OH@RIQ$P8C^@;)"9 "5-"J ?C&F,,:
+PID<C<8580IIN?47\?:G/DL6GBG.Q[Y?H/VP'GJ!IG[^.;OEGB(5!D9YMX@R[['B,
+P*:R/ M3<']GVE5"NJG%H4QQ(J-7QI069XJ-A37="KLH>EYI.WB85$T"?IHUK^X]K
+PB2#RO(YCP]7<X$ZO 8=JI5;5?UJ3(&FI".U]>&G9WGU\;V44_]J.JMI\GY<H6"4W
+P]PVEH ET-'8D^??.<5@[GH#M$?2%DY="IQ8;O&F@>XX:>:?Q(&#\:^BO)L2&E)$C
+PW*X=\V*+_&1X-<]@  83S7WU@U@2E*W-;P05F=/MCD0.$$5?7ZE*-;;Q/<VS@B"(
+P %&R["<"+GDZPL<WFCL30I\G>7]D9+CCF)G"5=0"3')2D4MJ3,[,M)YD^*M8/A;$
+P#-$"OZ2FZ4A03[4J=5(V!5WHCX*2H7XO_ 0%,EJA@43ZTW*N6G4R!X\2 0YH_<,=
+PN4?<,1VML2$FT>>U6@CG_NG\L@ 4/H5KZ.]9I)$SG9S=Y&5@"FGFF@ISF9@_6U(-
+PDN_&5HNY1,G+GYG?HU24L">([],ZHVGPC9TTP\"QBV'T!(E9_(B8#LP Z0!HP- U
+P]9GG<I"EH;N^"]8K^+F]V&J)<*PO/J#<788:#C>&-A:_[W+T1U]CL1BEK[BQN\T5
+PS!J_8 US]#:%I@ADF67G;$F[/->5HIYQ\)PU"7*)6<K>6O)N)#87>WKD\W!$.J#8
+P:P:(FUQ6-Q,U'+_+??6Z8W..@E61V+(P]6:J0I#I&=^(L'FO^OK/WC J<RH.YQTN
+P-0Q9^]K)RAQGD9#_E%!OB!*4'6:-6>NW:V T*A.#T0GC<$PUO9B>S/8R]&23F9A-
+P?*% E*8LAA@9[SK'#DBB0C>>777+CYR[4SXP[.BCS5&H7FT$OU! /89++JUB8&/Y
+PI]XK4"2X(=;$80'*IQC*/I=U_$)8_NF1RJ6UXT('<O?GQ]IWEUD'NB0\_VP96C'?
+PFPK:LF0/EEVT 57=<?0/EL2@T4S1?FGU^R\? $ILAV_\1/S+&@ =CF->)C)B'C.[
+P'<O.+KF/)T].?X;5>!'R5P[XW-])04.[^;>@ 6N]_!D!]7%!8D3YKWB*1?EN RW6
+P>+Y2&@5?%#]=[:YLRP>+;&KY$GVS"<!<-=3J6%]H&U9^">%S2RU*"UUUV7/LC?:H
+PE>6HH[FWC-QV FADV[<ZCY0S9\PH[J.<*<D^>X+Z/>&!6':1OVZG0G:D^ 6+Q+]U
+P]YNY7(PV\:U:H(3!;>W%@5SBEPUNX*EX3ZE')<93TK89UP*G"<KI,A<9B 9DOP;B
+PNXL:13\.YTT=_P"8=<P(8OWLL.P7?F5<#OHPZ!0 $K(KS>QR_37^;JY''"BQV^.P
+PO3?&T,$LYQ5-!!IS+F>:%,0-A.X5(B7JM O80#KC9#>'F.,*U[^[IWU(AI#'E)6=
+`endprotected128
+
+
+endmodule
